@@ -15,7 +15,6 @@ Strategy:
   correct NULL handling.
 """
 
-from functools import reduce
 from typing import List, Tuple, Optional
 
 from pyspark.sql import DataFrame
@@ -32,11 +31,10 @@ from utils import validate_inputs, get_non_key_cols, add_prefix
 
 def _build_join_condition(key_cols: List[str]) -> Column:
     """Build a conjunctive join condition on key columns across prev/curr aliases."""
-    conditions = [
-        F.col(f"{PREV_PREFIX}{k}").eqNullSafe(F.col(f"{CURR_PREFIX}{k}"))
-        for k in key_cols
-    ]
-    return reduce(lambda a, b: a & b, conditions)
+    condition = F.col(f"{PREV_PREFIX}{key_cols[0]}").eqNullSafe(F.col(f"{CURR_PREFIX}{key_cols[0]}"))
+    for k in key_cols[1:]:
+        condition = condition & F.col(f"{PREV_PREFIX}{k}").eqNullSafe(F.col(f"{CURR_PREFIX}{k}"))
+    return condition
 
 
 def _build_changed_condition(non_key_cols: List[str]) -> Column:
@@ -44,11 +42,10 @@ def _build_changed_condition(non_key_cols: List[str]) -> Column:
     Returns a condition that is True when at least one non-key column differs
     between prev and curr (NULL-safe comparison).
     """
-    diffs = [
-        ~F.col(f"{PREV_PREFIX}{c}").eqNullSafe(F.col(f"{CURR_PREFIX}{c}"))
-        for c in non_key_cols
-    ]
-    return reduce(lambda a, b: a | b, diffs)
+    condition = ~F.col(f"{PREV_PREFIX}{non_key_cols[0]}").eqNullSafe(F.col(f"{CURR_PREFIX}{non_key_cols[0]}"))
+    for c in non_key_cols[1:]:
+        condition = condition | ~F.col(f"{PREV_PREFIX}{c}").eqNullSafe(F.col(f"{CURR_PREFIX}{c}"))
+    return condition
 
 
 def _build_unchanged_condition(non_key_cols: List[str]) -> Column:
@@ -56,11 +53,10 @@ def _build_unchanged_condition(non_key_cols: List[str]) -> Column:
     Returns a condition that is True when all non-key columns are equal
     between prev and curr (NULL-safe comparison).
     """
-    sames = [
-        F.col(f"{PREV_PREFIX}{c}").eqNullSafe(F.col(f"{CURR_PREFIX}{c}"))
-        for c in non_key_cols
-    ]
-    return reduce(lambda a, b: a & b, sames)
+    condition = F.col(f"{PREV_PREFIX}{non_key_cols[0]}").eqNullSafe(F.col(f"{CURR_PREFIX}{non_key_cols[0]}"))
+    for c in non_key_cols[1:]:
+        condition = condition & F.col(f"{PREV_PREFIX}{c}").eqNullSafe(F.col(f"{CURR_PREFIX}{c}"))
+    return condition
 
 
 def _select_output_cols(
