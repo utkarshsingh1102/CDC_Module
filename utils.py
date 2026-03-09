@@ -1,6 +1,7 @@
 from typing import List
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from config import ROW_HASH_COL
 
 
 def validate_inputs(df_prev: DataFrame, df_curr: DataFrame, key_cols: List[str]) -> None:
@@ -32,8 +33,13 @@ def get_non_key_cols(df: DataFrame, key_cols: List[str]) -> List[str]:
     return [c for c in df.columns if c not in key_cols]
 
 
-def add_prefix(df: DataFrame, prefix: str) -> DataFrame:
-    """Rename all columns in df by prepending prefix."""
-    for col in df.columns:
-        df = df.withColumnRenamed(col, f"{prefix}{col}")
-    return df
+def compute_row_hash(df: DataFrame, non_key_cols: List[str]) -> DataFrame:
+    """
+    Add a SHA-256 hash column of all non-key columns to the DataFrame.
+    NULLs are represented as '__NULL__' to distinguish them from empty strings.
+    """
+    hash_input = [
+        F.coalesce(F.col(c).cast("string"), F.lit("__NULL__"))
+        for c in non_key_cols
+    ]
+    return df.withColumn(ROW_HASH_COL, F.sha2(F.concat_ws("|", *hash_input), 256))

@@ -10,9 +10,10 @@ CDC_FLAG_DELETE = "D"
 LOAD_TIMESTAMP_COL = "load_timestamp"
 CDC_FLAG_COL = "cdc_flag"
 
-# Join alias prefixes
-PREV_PREFIX = "prev__"
-CURR_PREFIX = "curr__"
+# Hash column constants
+ROW_HASH_COL  = "row_hash"
+PREV_HASH_COL = "prev_row_hash"
+CURR_HASH_COL = "curr_row_hash"
 
 # Broadcast join size threshold (bytes) — 10 MB default
 BROADCAST_THRESHOLD_BYTES = 10 * 1024 * 1024

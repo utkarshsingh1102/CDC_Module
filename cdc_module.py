@@ -10,69 +10,23 @@ on key_cols and returns three classified DataFrames:
 All outputs contain a load_timestamp metadata column.
 
 Strategy:
-  Single full outer join (one shuffle) with prefixed aliases to avoid column
-  collisions, followed by filter-based classification using eqNullSafe for
-  correct NULL handling.
+  Hash-based CDC — computes a SHA-256 hash of all non-key columns for both
+  df_prev and df_curr, then joins on key columns and compares a single hash
+  value instead of individual columns. Only key columns + hash are read from
+  df_prev, minimising shuffle size regardless of table width.
 """
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.column import Column
 
 from config import (
     CDC_FLAG_INSERT, CDC_FLAG_UPDATE, CDC_FLAG_NO_CHANGE,
     CDC_FLAG_COL, LOAD_TIMESTAMP_COL,
-    PREV_PREFIX, CURR_PREFIX,
+    PREV_HASH_COL, CURR_HASH_COL,
 )
-from utils import validate_inputs, get_non_key_cols, add_prefix
-
-
-def _build_join_condition(key_cols: List[str]) -> Column:
-    """Build a conjunctive join condition on key columns across prev/curr aliases."""
-    condition = F.col(f"{PREV_PREFIX}{key_cols[0]}").eqNullSafe(F.col(f"{CURR_PREFIX}{key_cols[0]}"))
-    for k in key_cols[1:]:
-        condition = condition & F.col(f"{PREV_PREFIX}{k}").eqNullSafe(F.col(f"{CURR_PREFIX}{k}"))
-    return condition
-
-
-def _build_changed_condition(non_key_cols: List[str]) -> Column:
-    """
-    Returns a condition that is True when at least one non-key column differs
-    between prev and curr (NULL-safe comparison).
-    """
-    condition = ~F.col(f"{PREV_PREFIX}{non_key_cols[0]}").eqNullSafe(F.col(f"{CURR_PREFIX}{non_key_cols[0]}"))
-    for c in non_key_cols[1:]:
-        condition = condition | ~F.col(f"{PREV_PREFIX}{c}").eqNullSafe(F.col(f"{CURR_PREFIX}{c}"))
-    return condition
-
-
-def _build_unchanged_condition(non_key_cols: List[str]) -> Column:
-    """
-    Returns a condition that is True when all non-key columns are equal
-    between prev and curr (NULL-safe comparison).
-    """
-    condition = F.col(f"{PREV_PREFIX}{non_key_cols[0]}").eqNullSafe(F.col(f"{CURR_PREFIX}{non_key_cols[0]}"))
-    for c in non_key_cols[1:]:
-        condition = condition & F.col(f"{PREV_PREFIX}{c}").eqNullSafe(F.col(f"{CURR_PREFIX}{c}"))
-    return condition
-
-
-def _select_output_cols(
-    joined: DataFrame,
-    key_cols: List[str],
-    non_key_cols: List[str],
-    use_curr: bool,
-) -> List[Column]:
-    """
-    Build the final SELECT expression from the joined DataFrame.
-    - Key columns are taken from curr (inserts/updates) or prev (no-change).
-    - Non-key columns follow the same side preference.
-    """
-    prefix = CURR_PREFIX if use_curr else PREV_PREFIX
-    output = [F.col(f"{prefix}{c}").alias(c) for c in key_cols + non_key_cols]
-    return output
+from utils import validate_inputs, get_non_key_cols, compute_row_hash
 
 
 def run_cdc(
@@ -83,7 +37,7 @@ def run_cdc(
     broadcast_curr: bool = False,
 ) -> Tuple[DataFrame, DataFrame, DataFrame]:
     """
-    Run CDC comparison between df_prev and df_curr.
+    Run hash-based CDC comparison between df_prev and df_curr.
 
     Parameters
     ----------
@@ -101,66 +55,63 @@ def run_cdc(
 
     non_key_cols = get_non_key_cols(df_curr, key_cols)
 
-    # Prefix all columns to avoid ambiguity after join
-    prev_prefixed = add_prefix(df_prev, PREV_PREFIX)
-    curr_prefixed = add_prefix(df_curr, CURR_PREFIX)
+    # Compute SHA-256 hash of all non-key columns
+    # df_prev: keep only key cols + hash — reduces shuffle size significantly
+    prev_hashed = (
+        compute_row_hash(df_prev, non_key_cols)
+        .select(key_cols + ["row_hash"])
+        .withColumnRenamed("row_hash", PREV_HASH_COL)
+    )
+
+    # df_curr: keep full row + hash (needed for output columns)
+    curr_hashed = (
+        compute_row_hash(df_curr, non_key_cols)
+        .withColumnRenamed("row_hash", CURR_HASH_COL)
+    )
 
     # Optionally apply broadcast hints
     if broadcast_prev:
-        prev_prefixed = F.broadcast(prev_prefixed)
+        prev_hashed = F.broadcast(prev_hashed)
     if broadcast_curr:
-        curr_prefixed = F.broadcast(curr_prefixed)
+        curr_hashed = F.broadcast(curr_hashed)
 
-    join_condition = _build_join_condition(key_cols)
-
-    # Single full outer join — one shuffle
-    joined = prev_prefixed.join(curr_prefixed, on=join_condition, how="full")
+    # Join on key columns — Spark deduplicates key cols when joining with a list
+    # One shuffle, but prev side carries only key + hash (not full row)
+    joined = prev_hashed.join(curr_hashed, on=key_cols, how="full")
 
     load_ts = F.current_timestamp().alias(LOAD_TIMESTAMP_COL)
+    output_cols = [F.col(c) for c in key_cols + non_key_cols]
 
-    # ── Inserts: prev key IS NULL (record only exists in curr) ──────────────
-    insert_filter = F.col(f"{PREV_PREFIX}{key_cols[0]}").isNull()
+    # ── Inserts: prev hash IS NULL (record only exists in curr) ─────────────
     df_new = (
-        joined.filter(insert_filter)
-        .select(
-            *_select_output_cols(joined, key_cols, non_key_cols, use_curr=True),
-            F.lit(CDC_FLAG_INSERT).alias(CDC_FLAG_COL),
-            load_ts,
-        )
+        joined.filter(F.col(PREV_HASH_COL).isNull())
+        .select(*output_cols, F.lit(CDC_FLAG_INSERT).alias(CDC_FLAG_COL), load_ts)
     )
 
-    # ── Updates: both keys exist + at least one non-key col differs ─────────
-    both_exist = (
-        F.col(f"{PREV_PREFIX}{key_cols[0]}").isNotNull()
-        & F.col(f"{CURR_PREFIX}{key_cols[0]}").isNotNull()
-    )
-
+    # ── Updates: both exist + hashes differ ─────────────────────────────────
     if non_key_cols:
-        changed_condition = _build_changed_condition(non_key_cols)
-        update_filter = both_exist & changed_condition
-        unchanged_filter = both_exist & _build_unchanged_condition(non_key_cols)
+        update_filter = (
+            F.col(PREV_HASH_COL).isNotNull()
+            & F.col(CURR_HASH_COL).isNotNull()
+            & (F.col(PREV_HASH_COL) != F.col(CURR_HASH_COL))
+        )
+        unchanged_filter = F.col(PREV_HASH_COL) == F.col(CURR_HASH_COL)
     else:
         # No non-key columns — nothing can change, so updates are impossible
         update_filter = F.lit(False)
-        unchanged_filter = both_exist
+        unchanged_filter = (
+            F.col(PREV_HASH_COL).isNotNull() & F.col(CURR_HASH_COL).isNotNull()
+        )
 
     df_updated = (
         joined.filter(update_filter)
-        .select(
-            *_select_output_cols(joined, key_cols, non_key_cols, use_curr=True),
-            F.lit(CDC_FLAG_UPDATE).alias(CDC_FLAG_COL),
-            load_ts,
-        )
+        .select(*output_cols, F.lit(CDC_FLAG_UPDATE).alias(CDC_FLAG_COL), load_ts)
     )
 
-    # ── No Change: both keys exist + all non-key cols match ─────────────────
+    # ── No Change: hashes match ──────────────────────────────────────────────
     df_no_change = (
         joined.filter(unchanged_filter)
-        .select(
-            *_select_output_cols(joined, key_cols, non_key_cols, use_curr=True),
-            F.lit(CDC_FLAG_NO_CHANGE).alias(CDC_FLAG_COL),
-            load_ts,
-        )
+        .select(*output_cols, F.lit(CDC_FLAG_NO_CHANGE).alias(CDC_FLAG_COL), load_ts)
     )
 
     return df_new, df_updated, df_no_change
