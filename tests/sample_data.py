@@ -5,6 +5,7 @@ Each fixture returns (df_prev, df_curr, key_cols) ready for run_cdc().
 """
 
 from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 
 
 def get_spark() -> SparkSession:
@@ -60,13 +61,16 @@ def fixture_nulls():
     spark = get_spark()
     schema = ["id", "name", "salary"]
 
+    schema = StructType([
+        StructField("id", IntegerType(), True),
+        StructField("name", StringType(), True),
+        StructField("salary", IntegerType(), True),
+    ])
     df_prev = spark.createDataFrame(
-        [(1, "Alice", None), (2, "Bob", None)],
-        ["id", "name", "salary"],
+        [(1, "Alice", None), (2, "Bob", None)], schema=schema
     )
     df_curr = spark.createDataFrame(
-        [(1, "Alice", 50000), (2, "Bob", None)],
-        ["id", "name", "salary"],
+        [(1, "Alice", 50000), (2, "Bob", None)], schema=schema
     )
     return df_prev, df_curr, ["id"]
 

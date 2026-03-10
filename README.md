@@ -55,72 +55,66 @@ non_key_cols    = ["name", "dept", "salary"]   ← these get compared
 
 ---
 
-### Step 4 — Prefix All Columns (`utils.py → add_prefix`)
+### Step 4 — Compute SHA-256 Row Hash (`utils.py → compute_row_hash`)
 
-Both DataFrames have all their columns renamed with a prefix to avoid column name collisions after the join.
+A SHA-256 hash is computed over all non-key columns for both DataFrames. NULLs are replaced with `"__NULL__"` before hashing so that NULL vs NULL is correctly treated as equal.
 
 ```
-df_prev columns:  emp_id, name, dept, salary
-                        ↓ add_prefix("prev__")
-                  prev__emp_id, prev__name, prev__dept, prev__salary
+df_prev row:  emp_id=1, name="Alice", dept="Engineering", salary=80000
+                        ↓ SHA-256( "Alice|Engineering|80000" )
+              prev_row_hash = "a3f9..."
 
-df_curr columns:  emp_id, name, dept, salary
-                        ↓ add_prefix("curr__")
-                  curr__emp_id, curr__name, curr__dept, curr__salary
+df_curr row:  emp_id=1, name="Alice", dept="Engineering", salary=95000
+                        ↓ SHA-256( "Alice|Engineering|95000" )
+              curr_row_hash = "b72c..."   ← different hash → Update detected
 ```
+
+`df_prev` is then slimmed to **key columns + hash only** — no full row data needed for the join.
 
 ---
 
-### Step 5 — Full Outer Join (`cdc_module.py → _build_join_condition`)
+### Step 5 — Full Outer Join on Key Columns
 
-A single **full outer join** is performed between the two prefixed DataFrames on the key columns using `eqNullSafe` (so NULL keys are handled correctly).
+A single **full outer join** is performed on the key columns. Because `df_prev` carries only the hash (not all columns), the data shuffled across the network is minimal regardless of how wide the table is.
 
 ```
-prev_prefixed  FULL OUTER JOIN  curr_prefixed
-       ON  prev__emp_id <=> curr__emp_id
+prev_slim (key + prev_row_hash)  FULL OUTER JOIN  curr_hashed (all cols + curr_row_hash)
+                          ON  emp_id
 
 Result (joined DataFrame):
-┌──────────────┬───────────────┬──────────────┬───────────────┐
-│ prev__emp_id │ prev__salary  │ curr__emp_id │ curr__salary  │
-├──────────────┼───────────────┼──────────────┼───────────────┤
-│ 1            │ 80000         │ 1            │ 95000         │  ← both sides present
-│ 2            │ 60000         │ 2            │ 60000         │  ← both sides present
-│ 3            │ 75000         │ NULL         │ NULL          │  ← only in prev (delete)
-│ NULL         │ NULL          │ 4            │ 55000         │  ← only in curr (insert)
-└──────────────┴───────────────┴──────────────┴───────────────┘
+┌────────┬──────────────┬─────┬──────────────────┐
+│ emp_id │ prev_row_hash│ ... │ curr_row_hash     │
+├────────┼──────────────┼─────┼──────────────────┤
+│ 1      │ "a3f9..."    │ ... │ "b72c..."         │  ← hashes differ → Update
+│ 2      │ "c841..."    │ ... │ "c841..."         │  ← hashes match  → No Change
+│ 3      │ "e10f..."    │ ... │ NULL              │  ← only in prev  → Delete (not handled)
+│ 4      │ NULL         │ ... │ "f55a..."         │  ← only in curr  → Insert
+└────────┴──────────────┴─────┴──────────────────┘
 ```
-
-This is done in **one shuffle** — the most expensive Spark operation — keeping the pipeline efficient.
 
 ---
 
-### Step 6 — Classify Records by Filtering the Joined Result
+### Step 6 — Classify Records by Comparing Hashes
 
-The joined DataFrame is filtered three times to produce three output DataFrames:
+The joined DataFrame is filtered three times using a **single hash column comparison** instead of N individual column conditions:
 
-**Inserts** — `prev__key IS NULL` (record only exists in curr)
+**Inserts** — `prev_row_hash IS NULL` (record only exists in curr)
 ```
-insert_filter = prev__emp_id IS NULL
+insert_filter = prev_row_hash IS NULL
 → df_new  (cdc_flag = "I")
 ```
 
-**Updates** — both keys exist AND at least one non-key column differs
+**Updates** — both hashes exist AND they differ
 ```
-update_filter = prev__emp_id IS NOT NULL
-              AND curr__emp_id IS NOT NULL
-              AND (prev__salary <=> curr__salary = FALSE   ← _build_changed_condition
-                  OR prev__name <=> curr__name = FALSE
-                  OR ...)
+update_filter = prev_row_hash IS NOT NULL
+              AND curr_row_hash IS NOT NULL
+              AND prev_row_hash != curr_row_hash
 → df_updated  (cdc_flag = "U")
 ```
 
-**No Change** — both keys exist AND all non-key columns match
+**No Change** — hashes are equal
 ```
-unchanged_filter = prev__emp_id IS NOT NULL
-                 AND curr__emp_id IS NOT NULL
-                 AND prev__salary <=> curr__salary        ← _build_unchanged_condition
-                 AND prev__name   <=> curr__name
-                 AND ...
+unchanged_filter = prev_row_hash == curr_row_hash
 → df_no_change  (cdc_flag = "NC")
 ```
 
@@ -128,13 +122,12 @@ unchanged_filter = prev__emp_id IS NOT NULL
 
 ### Step 7 — Select Output Columns and Add Metadata
 
-For each classified DataFrame, the prefixed column names are stripped back to their original names and two metadata columns are added:
+For each classified DataFrame, the curr columns are selected (hash columns dropped) and two metadata columns are added:
 
 ```
-curr__emp_id  →  emp_id
-curr__salary  →  salary
-+ cdc_flag       = "I" / "U" / "NC"
-+ load_timestamp = current timestamp of the CDC run
+emp_id, name, dept, salary   ← original columns from curr
++ cdc_flag                   = "I" / "U" / "NC"
++ load_timestamp             = current timestamp of the CDC run
 ```
 
 ---
@@ -146,16 +139,21 @@ df_prev (previous snapshot)          df_curr (current data)
          │                                    │
          └──────────── validate ──────────────┘
                             │
-                     add column prefixes
-                    (prev__*, curr__*)
-                            │
-                    FULL OUTER JOIN
-                   (single shuffle)
+              ┌─────────────┴──────────────┐
+              ▼                            ▼
+   compute SHA-256 hash          compute SHA-256 hash
+   slim to key + hash only       keep full row + hash
+   (prev_row_hash)               (curr_row_hash)
+              │                            │
+              └──── FULL OUTER JOIN ────────┘
+                     on key columns
+                    (single shuffle,
+                     prev side is tiny)
                             │
               ┌─────────────┼─────────────┐
               ▼             ▼             ▼
-         prev IS NULL   both exist    both exist
-              │        + col changed  + col same
+    prev_hash IS NULL   hashes differ  hashes match
+              │             │             │
               ▼             ▼             ▼
            df_new      df_updated   df_no_change
          (flag = I)   (flag = U)   (flag = NC)
@@ -170,15 +168,17 @@ df_prev (previous snapshot)          df_curr (current data)
 
 ## How It Works
 
-The module performs a single **full outer join** on the specified business key columns, then classifies each record using filters:
+The module computes a **SHA-256 hash** of all non-key columns for each row, then performs a single full outer join on key columns and compares only the hash values to classify changes:
 
 | Condition | Classification | `cdc_flag` |
 |---|---|---|
-| Key only in `df_curr` | New record | `I` |
-| Key in both, non-key columns changed | Updated record | `U` |
-| Key in both, all non-key columns match | Unchanged record | `NC` |
+| `prev_row_hash` IS NULL | New record | `I` |
+| Both hashes exist and differ | Updated record | `U` |
+| Both hashes are equal | Unchanged record | `NC` |
 
-- Uses `eqNullSafe()` for correct NULL handling (NULL == NULL is treated as equal)
+- SHA-256 hashing collapses N-column comparison into a single hash comparison
+- `df_prev` is slimmed to key columns + hash only before the join — minimal shuffle
+- NULLs are handled correctly (`NULL` → `"__NULL__"` before hashing)
 - Single shuffle (one join) for efficiency
 - Supports AQE, broadcast hints, and skew join handling (Spark 3.x)
 
@@ -201,8 +201,8 @@ CDC_Module/
 
 ## Requirements
 
-- Python 3.8+
-- PySpark 3.x
+- Python 3.11+
+- PySpark 4.x
 - pytest (for running tests)
 
 Install dependencies:

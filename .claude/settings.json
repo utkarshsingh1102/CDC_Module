@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python main.py)",
+      "Bash(python3 main.py)",
+      "Bash(pip3 install:*)",
+      "Bash(java -version)",
+      "Bash(brew install:*)",
+      "Bash(export PATH=\"/opt/homebrew/opt/openjdk/bin:$PATH\")",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11)",
+      "Bash(python3.11 main.py)",
+      "Bash(python3.11 -m pytest tests/test_cdc.py -v)"
+    ]
+  }
+}
