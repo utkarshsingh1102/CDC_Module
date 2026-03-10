@@ -199,17 +199,169 @@ CDC_Module/
 
 ---
 
-## Requirements
+## Setup & Installation
 
-- Python 3.11+
-- PySpark 4.x
-- pytest (for running tests)
+### Prerequisites
 
-Install dependencies:
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.11+ | Must be the actual binary, not a shell alias |
+| Java (JDK) | 11+ | Required by Apache Spark |
+| PySpark | 4.x | Installed via pip |
+| pytest | Any | For running tests only |
+
+---
+
+### Step 1 — Install Java
+
+Spark requires Java to run. If Java is not installed:
+
+**macOS (Homebrew):**
+```bash
+brew install openjdk
+```
+
+After installation, add Java to your PATH. Homebrew will print the exact command — it will look like:
+```bash
+export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+```
+
+Verify:
+```bash
+java -version
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt update && sudo apt install -y openjdk-17-jdk
+```
+
+**Windows:**
+Download and install from https://adoptium.net and ensure `JAVA_HOME` is set.
+
+---
+
+### Step 2 — Install Python 3.11+
+
+**macOS:**
+```bash
+brew install python@3.11
+```
+
+**Ubuntu:**
+```bash
+sudo apt install -y python3.11 python3.11-pip
+```
+
+**Windows:**
+Download from https://www.python.org/downloads/
+
+Verify:
+```bash
+python3.11 --version
+```
+
+---
+
+### Step 3 — Clone the Repository
+
+```bash
+git clone <repository-url>
+cd CDC_Module
+```
+
+---
+
+### Step 4 — Install Python Dependencies
 
 ```bash
 pip install pyspark pytest
 ```
+
+---
+
+### Step 5 — Set Environment Variables
+
+This is **required** — Spark's internal worker process must use the same Python that has PySpark installed.
+
+**macOS / Linux:**
+```bash
+export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"          # Java (macOS only)
+export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11         # macOS
+# or
+export PYSPARK_PYTHON=/usr/bin/python3.11                  # Linux
+```
+
+To make these permanent, add them to your `~/.zshrc` or `~/.bashrc`:
+```bash
+echo 'export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"' >> ~/.zshrc
+echo 'export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11' >> ~/.zshrc
+source ~/.zshrc
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:PYSPARK_PYTHON = "C:\Python311\python.exe"
+$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-17"
+```
+
+---
+
+## Running the Demo
+
+```bash
+export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11
+python3.11 main.py
+```
+
+Expected output:
+```
+===== INSERTS (cdc_flag = 'I') =====
++------+----+-----+------+--------+-------------------+
+|emp_id|name|dept |salary|cdc_flag|load_timestamp     |
++------+----+-----+------+--------+-------------------+
+|4     |Dave|Sales|55000 |I       |2024-01-10 ...     |
++------+----+-----+------+--------+-------------------+
+
+===== UPDATES (cdc_flag = 'U') =====
++------+-----+-----------+------+--------+-------------------+
+|emp_id|name |dept       |salary|cdc_flag|load_timestamp     |
++------+-----+-----------+------+--------+-------------------+
+|1     |Alice|Engineering|95000 |U       |2024-01-10 ...     |
++------+-----+-----------+------+--------+-------------------+
+
+===== NO CHANGE (cdc_flag = 'NC') =====
++------+---+---------+------+--------+-------------------+
+|emp_id|name|dept    |salary|cdc_flag|load_timestamp     |
++------+---+---------+------+--------+-------------------+
+|2     |Bob|Marketing|60000 |NC      |2024-01-10 ...     |
++------+---+---------+------+--------+-------------------+
+```
+
+---
+
+## Running Tests
+
+```bash
+export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11
+python3.11 -m pytest tests/test_cdc.py -v
+```
+
+Expected output:
+```
+25 passed in ~11s
+```
+
+---
+
+## Requirements
+
+- Python 3.11+
+- Java JDK 11+
+- PySpark 4.x
+- pytest (for running tests only)
 
 ---
 
@@ -269,19 +421,7 @@ All three output DataFrames share the same schema as the input, plus two additio
 
 ---
 
-## Running the Demo
-
-```bash
-python main.py
-```
-
-## Running Tests
-
-```bash
-python -m pytest tests/test_cdc.py -v
-```
-
-### Test Coverage
+## Test Coverage
 
 | Test Class | Scenario |
 |---|---|
