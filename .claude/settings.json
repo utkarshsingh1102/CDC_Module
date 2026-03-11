@@ -10,7 +10,8 @@
       "Read(//opt/homebrew/bin/**)",
       "Bash(export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11)",
       "Bash(python3.11 main.py)",
-      "Bash(python3.11 -m pytest tests/test_cdc.py -v)"
+      "Bash(python3.11 -m pytest tests/test_cdc.py -v)",
+      "Bash(chmod +x /Users/utkarshsingh/Desktop/CDC_Module/start.sh /Users/utkarshsingh/Desktop/CDC_Module/test.sh)"
     ]
   }
 }
