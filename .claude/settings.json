@@ -11,7 +11,9 @@
       "Bash(export PYSPARK_PYTHON=/opt/homebrew/bin/python3.11)",
       "Bash(python3.11 main.py)",
       "Bash(python3.11 -m pytest tests/test_cdc.py -v)",
-      "Bash(chmod +x /Users/utkarshsingh/Desktop/CDC_Module/start.sh /Users/utkarshsingh/Desktop/CDC_Module/test.sh)"
+      "Bash(chmod +x /Users/utkarshsingh/Desktop/CDC_Module/start.sh /Users/utkarshsingh/Desktop/CDC_Module/test.sh)",
+      "Bash(python3 -c \"import pyspark; print\\(pyspark.__version__\\)\")",
+      "Bash(/opt/homebrew/bin/python3.11 -c \"import pyspark; print\\(pyspark.__version__\\)\")"
     ]
   }
 }

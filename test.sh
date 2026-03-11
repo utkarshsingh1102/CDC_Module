@@ -10,19 +10,42 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ── Dependency check ──────────────────────────────────────────────────────────
-if ! command -v python3 &>/dev/null; then
-  echo "ERROR: python3 not found. Please install Python 3.8+." >&2
-  exit 1
+# ── Resolve Java (required by PySpark) ───────────────────────────────────────
+if [ -z "${JAVA_HOME:-}" ]; then
+  if [ -d "/opt/homebrew/opt/openjdk@17" ]; then
+    export JAVA_HOME="/opt/homebrew/opt/openjdk@17"
+  elif [ -d "/opt/homebrew/opt/openjdk" ]; then
+    export JAVA_HOME="/opt/homebrew/opt/openjdk"
+  fi
 fi
+export PATH="${JAVA_HOME}/bin:${PATH}"
 
-for pkg in pyspark pytest; do
-  if ! python3 -c "import $pkg" &>/dev/null; then
-    echo "ERROR: '$pkg' not installed. Run:  pip install $pkg" >&2
-    exit 1
+# ── Resolve Python (honours alias → explicit Homebrew path as fallback) ───────
+PYTHON=""
+for candidate in python3.11 python3 python; do
+  full="$(command -v "$candidate" 2>/dev/null || true)"
+  if [ -n "$full" ] && "$full" -c "import pyspark" &>/dev/null; then
+    PYTHON="$full"
+    break
   fi
 done
 
+if [ -z "$PYTHON" ]; then
+  echo "ERROR: No Python with pyspark found." >&2
+  echo "       Run:  pip install pyspark  (or activate your virtualenv first)" >&2
+  exit 1
+fi
+
+if ! "$PYTHON" -c "import pytest" &>/dev/null; then
+  echo "ERROR: pytest not installed. Run:  pip install pytest" >&2
+  exit 1
+fi
+
+# ── Ensure Spark workers use the same Python as the driver ────────────────────
+export PYSPARK_PYTHON="$PYTHON"
+export PYSPARK_DRIVER_PYTHON="$PYTHON"
+
 # ── Run tests ─────────────────────────────────────────────────────────────────
+echo "Using Python: $PYTHON"
 echo "Running CDC test suite..."
-python3 -m pytest tests/test_cdc.py -v "$@"
+"$PYTHON" -m pytest tests/test_cdc.py -v "$@"
